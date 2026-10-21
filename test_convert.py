@@ -114,6 +114,18 @@ class ConvertTest(unittest.TestCase):
         self.assertEqual(self.files(), ["Title.azw3", "Title.epub"])
         self.assertEqual((self.lib / "Title.azw3").read_text(), "book")
 
+    def test_part_symlink_not_followed(self):
+        self.book("Title.epub")
+        outside = Path(self.tmp.name) / "outside.txt"
+        outside.write_text("untouched")
+        target = self.lib / "Title.azw3"
+        source, _, fmt = next(convert.find_jobs(self.config(), {}))
+        target.with_name(target.name + convert.PART_SUFFIX).symlink_to(outside)
+        convert.convert(self.config(), source, target, fmt)
+        self.assertEqual(outside.read_text(), "untouched")
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(target.read_text(), "book")
+
     def config(self):
         old = os.environ.copy()
         os.environ.update(self.env)

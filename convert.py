@@ -126,7 +126,12 @@ def convert(cfg, source, target, fmt):
             tail = (result.stderr or result.stdout).strip().splitlines()[-5:]
             raise RuntimeError(f"ebook-convert exited {result.returncode}: " + " | ".join(tail))
         part = target.with_name(target.name + PART_SUFFIX)
-        shutil.copyfile(out, part)
+        # Never follow a pre-existing part file or symlink: anyone who can write to
+        # the library could otherwise redirect this write elsewhere.
+        part.unlink(missing_ok=True)
+        fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+        with os.fdopen(fd, "wb") as dst, open(out, "rb") as src:
+            shutil.copyfileobj(src, dst)
         os.replace(part, target)
 
 
