@@ -67,8 +67,27 @@ def split_ext(name):
     return (stem, ext.lower()) if dot and stem else (name, "")
 
 
-def find_jobs(cfg, failed):
-    """Yield (source, target_path, target_format) for every conversion still missing."""
+def fingerprint(path):
+    st = path.stat()
+    return [st.st_size, st.st_mtime_ns]
+
+
+def rel(cfg, path):
+    return str(path.relative_to(cfg.library_dir))
+
+
+def find_jobs(cfg, state):
+    """Return (source, target, fmt, is_update) for every conversion that is missing or out of date.
+
+    A converted file is out of date when its source changed since the conversion (Grimmory
+    rewrites the EPUB when metadata is saved to the file). Only files this tool created are
+    ever replaced; a converted file that Grimmory moved or renamed is recognised by its
+    fingerprint. Scans the whole library before anything is converted, so state about moved
+    files is complete when it gets pruned.
+    """
+    converted, failed = state["converted"], state["failed"]
+    by_fingerprint = {tuple(e["target"]): r for r, e in converted.items()}
+    jobs = []
     for dirpath, dirnames, filenames in os.walk(cfg.library_dir):
         # Same convention as Grimmory: a folder with an .ignore file is skipped.
         if ".ignore" in filenames:
@@ -76,13 +95,13 @@ def find_jobs(cfg, failed):
             continue
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
 
-        present = set()  # (stem lowercased, ext)
+        files = {}  # (stem lowercased, ext) -> file name
         sources = {}  # stem lowercased -> file name of the preferred source
         for name in sorted(filenames):
             if name.startswith(".") or name.endswith(PART_SUFFIX):
                 continue
             stem, ext = split_ext(name)
-            present.add((stem.lower(), ext))
+            files[(stem.lower(), ext)] = name
             if ext in cfg.source_formats:
                 current = sources.get(stem.lower())
                 if current is None or cfg.source_formats.index(ext) < cfg.source_formats.index(split_ext(current)[1]):
@@ -90,29 +109,48 @@ def find_jobs(cfg, failed):
 
         for key, name in sorted(sources.items()):
             source = Path(dirpath) / name
+            source_fp = fingerprint(source)
             stem = split_ext(name)[0]
             for fmt in cfg.target_formats:
-                if (key, fmt) in present or failed_key(cfg, source, fmt) in failed:
-                    continue
-                yield source, source.with_name(f"{stem}.{fmt}"), fmt
+                existing = files.get((key, fmt))
+                target = Path(dirpath) / existing if existing else source.with_name(f"{stem}.{fmt}")
+                target_rel = rel(cfg, target)
+                if existing:
+                    target_fp = fingerprint(target)
+                    entry = converted.get(target_rel)
+                    if entry is None:
+                        old = by_fingerprint.get(tuple(target_fp))
+                        if old is None or (cfg.library_dir / old).exists():
+                            continue  # not created by this tool: never touch it
+                        entry = converted[target_rel] = converted.pop(old)
+                    entry["target"] = target_fp
+                    if entry["source"] == source_fp:
+                        continue
+                fail = failed.get(target_rel)
+                if fail and fail["source"] == source_fp:
+                    continue  # failed before and the source has not changed since
+                jobs.append((source, target, fmt, bool(existing)))
+
+    for r in [r for r in converted if not (cfg.library_dir / r).exists()]:
+        del converted[r]
+    return jobs
 
 
-def failed_key(cfg, source, fmt):
-    return f"{source.relative_to(cfg.library_dir)}::{fmt}"
-
-
-def load_failed(cfg):
+def load_state(cfg):
     try:
-        return json.loads((cfg.state_dir / "failed.json").read_text())
+        state = json.loads((cfg.state_dir / "state.json").read_text())
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        state = {}
+    state.setdefault("converted", {})
+    state.setdefault("failed", {})
+    return state
 
 
-def save_failed(cfg, failed):
+def save_state(cfg, state):
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
-    tmp = cfg.state_dir / "failed.json.tmp"
-    tmp.write_text(json.dumps(failed, indent=2, sort_keys=True))
-    tmp.replace(cfg.state_dir / "failed.json")
+    tmp = cfg.state_dir / "state.json.tmp"
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.replace(cfg.state_dir / "state.json")
 
 
 def convert(cfg, source, target, fmt):
@@ -146,29 +184,39 @@ def run_once(cfg):
         log(f"Library dir {cfg.library_dir} does not exist")
         return
     clean_stale_parts(cfg)
-    failed = load_failed(cfg)
+    state = load_state(cfg)
+    jobs = find_jobs(cfg, state)
+    if not cfg.dry_run:
+        save_state(cfg, state)
     done = errors = 0
-    for source, target, fmt in find_jobs(cfg, failed):
+    for source, target, fmt, is_update in jobs:
         if cfg.max_per_run and done + errors >= cfg.max_per_run:
             log(f"Reached MAX_PER_RUN={cfg.max_per_run}, rest waits for the next run")
             break
-        rel = target.relative_to(cfg.library_dir)
+        target_rel = rel(cfg, target)
+        action = "update" if is_update else "create"
         if cfg.dry_run:
-            log(f"[dry-run] would create {rel}")
+            log(f"[dry-run] would {action} {target_rel}")
             done += 1
             continue
-        log(f"Converting {source.relative_to(cfg.library_dir)} -> {fmt}")
+        reason = " (source changed)" if is_update else ""
+        log(f"Converting {rel(cfg, source)} -> {fmt}{reason}")
         started = time.monotonic()
+        # Taken before converting, so a change during the conversion triggers another one.
+        source_fp = fingerprint(source)
         try:
             convert(cfg, source, target, fmt)
         except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
             errors += 1
-            failed[failed_key(cfg, source, fmt)] = str(e)[:500]
-            save_failed(cfg, failed)
-            log(f"FAILED {rel}: {e}")
+            state["failed"][target_rel] = {"error": str(e)[:500], "source": source_fp}
+            save_state(cfg, state)
+            log(f"FAILED {target_rel}: {e}")
             continue
+        state["converted"][target_rel] = {"source": source_fp, "target": fingerprint(target)}
+        state["failed"].pop(target_rel, None)
+        save_state(cfg, state)
         done += 1
-        log(f"Created {rel} in {time.monotonic() - started:.0f}s")
+        log(f"{'Updated' if is_update else 'Created'} {target_rel} in {time.monotonic() - started:.0f}s")
     verb = "would convert" if cfg.dry_run else "converted"
     log(f"Run finished: {verb} {done}, failed {errors}")
 

@@ -13,11 +13,18 @@ format. Grimmory itself is not changed.
 ## How it works
 
 - Walks the library and, for every book in a source format (default `epub`), creates each target
-  format (default `azw3`) that is missing in that folder. Existing files are never overwritten.
+  format (default `azw3`) that is missing in that folder.
+- **Keeps converted files in sync.** When the source changes after a conversion (for example
+  Grimmory writing edited metadata or a new cover into the EPUB), the converted file is made
+  again on the next run. This only works if Grimmory's *Write metadata to file* setting is on
+  for EPUB; otherwise edits stay in Grimmory's database and neither file changes.
+- Only replaces files it created itself. A `Title.azw3` you put there yourself is never touched.
+  Converted files that Grimmory moves or renames are still recognised.
 - Converts in a scratch dir, copies the result into the library as `*.grimmory-convert.part`
   (an extension Grimmory ignores) and renames it into place, so Grimmory never sees half a file.
-- Failed conversions are written to `/config/failed.json` and skipped on later runs. Remove an
-  entry to retry it.
+- Keeps its bookkeeping in `/config/state.json`: which files it created, from which version of
+  the source, and which conversions failed. A failed conversion is retried only once the source
+  changes, or when you remove its entry from `failed`.
 - Folders with an `.ignore` file are skipped, like Grimmory does.
 - Starts in **dry-run** mode: it only logs what it would create.
 

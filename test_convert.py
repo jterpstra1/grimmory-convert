@@ -88,16 +88,71 @@ class ConvertTest(unittest.TestCase):
         self.assertNotIn("skip/A.azw3", self.files())
         self.assertNotIn(".hidden/B.azw3", self.files())
 
-    def test_failure_recorded_and_not_retried(self):
-        self.book("broken.epub")
+    def state(self):
+        return json.loads((Path(self.env["STATE_DIR"]) / "state.json").read_text())
+
+    def touch_later(self, path, content):
+        """Rewrite a file the way Grimmory does when it saves metadata: new content, newer mtime."""
+        st = path.stat()
+        path.write_text(content)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    def test_failure_recorded_and_retried_only_when_source_changes(self):
+        broken = self.book("broken.epub")
         self.book("good.epub")
         self.run_with()
         self.assertEqual(self.files(), ["broken.epub", "good.azw3", "good.epub"])
-        failed = json.loads((Path(self.env["STATE_DIR"]) / "failed.json").read_text())
-        self.assertIn("broken.epub::azw3", failed)
-        self.assertIn("broken book", failed["broken.epub::azw3"])
-        jobs = list(convert.find_jobs(self.config(), failed))
-        self.assertEqual(jobs, [])
+        self.assertIn("broken book", self.state()["failed"]["broken.azw3"]["error"])
+        self.assertEqual(convert.find_jobs(self.config(), self.state()), [])
+        self.touch_later(broken, "still broken")
+        self.assertEqual(len(convert.find_jobs(self.config(), self.state())), 1)
+
+    def test_reconverts_when_source_changes(self):
+        epub = self.book("Author/Title/Title.epub", "v1")
+        self.run_with()
+        self.assertEqual((self.lib / "Author/Title/Title.azw3").read_text(), "v1")
+        self.run_with()  # nothing changed: nothing to do
+        self.assertEqual(convert.find_jobs(self.config(), self.state()), [])
+        self.touch_later(epub, "v2 with new metadata")
+        self.run_with()
+        self.assertEqual((self.lib / "Author/Title/Title.azw3").read_text(), "v2 with new metadata")
+
+    def test_never_replaces_files_it_did_not_create(self):
+        epub = self.book("Title.epub", "v1")
+        self.book("Title.azw3", "my own")
+        self.touch_later(epub, "v2")
+        self.run_with()
+        self.assertEqual((self.lib / "Title.azw3").read_text(), "my own")
+
+    def test_follows_converted_file_that_grimmory_moved(self):
+        epub = self.book("Old/Title.epub", "v1")
+        self.run_with()
+        new_dir = self.lib / "New Author" / "New Title"
+        new_dir.mkdir(parents=True)
+        os.rename(epub, new_dir / "New Title.epub")
+        os.rename(self.lib / "Old/Title.azw3", new_dir / "New Title.azw3")
+        self.run_with()  # moved but unchanged: nothing to do
+        self.assertEqual(list(self.state()["converted"]), ["New Author/New Title/New Title.azw3"])
+        self.touch_later(new_dir / "New Title.epub", "v2")
+        self.run_with()
+        self.assertEqual((new_dir / "New Title.azw3").read_text(), "v2")
+
+    def test_deleted_converted_file_is_recreated(self):
+        self.book("Title.epub")
+        self.run_with()
+        (self.lib / "Title.azw3").unlink()
+        self.run_with()
+        self.assertIn("Title.azw3", self.files())
+        self.assertEqual(list(self.state()["converted"]), ["Title.azw3"])
+
+    def test_dry_run_reports_updates_and_writes_no_state(self):
+        epub = self.book("Title.epub", "v1")
+        self.run_with()
+        self.touch_later(epub, "v2")
+        before = self.state()
+        self.run_with(DRY_RUN="true")
+        self.assertEqual(self.state(), before)
+        self.assertEqual((self.lib / "Title.azw3").read_text(), "v1")
 
     def test_max_per_run(self):
         for n in range(3):
@@ -119,7 +174,7 @@ class ConvertTest(unittest.TestCase):
         outside = Path(self.tmp.name) / "outside.txt"
         outside.write_text("untouched")
         target = self.lib / "Title.azw3"
-        source, _, fmt = next(convert.find_jobs(self.config(), {}))
+        source, _, fmt, _ = convert.find_jobs(self.config(), convert.load_state(self.config()))[0]
         target.with_name(target.name + convert.PART_SUFFIX).symlink_to(outside)
         convert.convert(self.config(), source, target, fmt)
         self.assertEqual(outside.read_text(), "untouched")
