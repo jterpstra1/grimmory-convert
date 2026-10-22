@@ -47,10 +47,12 @@ Mounts: the library at `/books`, a small state dir at `/config`. The container r
 
 ## Unraid
 
-1. In **Docker > Add Container**, set *Template repositories* (Docker settings) to include
-   `https://github.com/jterpstra1/unraid-templates`, or paste the template URL
-   `https://raw.githubusercontent.com/jterpstra1/unraid-templates/main/grimmory-convert.xml`.
-2. Pick **grimmory-convert**, point **Library** at the same share Grimmory uses
+1. In the Unraid terminal (`>_` in the web UI), download the template:
+   ```bash
+   wget -O /boot/config/plugins/dockerMan/templates-user/my-grimmory-convert.xml https://raw.githubusercontent.com/jterpstra1/unraid-templates/main/grimmory-convert.xml
+   ```
+2. In **Docker > Add Container**, pick **grimmory-convert** under *User templates*, point
+   **Library** at the same share Grimmory uses
    (e.g. `/mnt/user/books/`), keep **Dry Run** `true` and **Max per run** `5`.
 3. Start it and read the log. If the planned files look right, set **Dry Run** to `false` and
    start it again. Check in Grimmory that the new formats show up on the books.
