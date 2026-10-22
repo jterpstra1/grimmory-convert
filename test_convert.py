@@ -175,6 +175,52 @@ class ConvertTest(unittest.TestCase):
         self.run_with()
         self.assertIn("Good.azw3", self.files())
 
+    def test_plugins_installed_into_fresh_config(self):
+        root = Path(self.tmp.name)
+        plugins = root / "plugins"
+        plugins.mkdir()
+        (plugins / "B Plugin.zip").write_text("zip")
+        (plugins / "a.zip").write_text("zip")
+        (plugins / "B Plugin.json").write_text('{"setting": 1}')
+        config = root / "calibre-config"
+        (config / "plugins").mkdir(parents=True)
+        (config / "plugins" / "old.zip").write_text("removed plugin")
+        calls = root / "calls.txt"
+        fake = root / "fake_customize.py"
+        fake.write_text(f"import sys\nopen({str(calls)!r}, 'a').write(sys.argv[2] + '\\n')\n")
+        old = os.environ.copy()
+        os.environ.update(self.env, PLUGINS_DIR=str(plugins), CALIBRE_CONFIG_DIRECTORY=str(config),
+                          CALIBRE_CUSTOMIZE=f"{sys.executable} {fake}")
+        try:
+            convert.install_plugins(convert.Config.from_env())
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertEqual(calls.read_text().splitlines(), [str(plugins / "B Plugin.zip"), str(plugins / "a.zip")])
+        self.assertFalse((config / "plugins" / "old.zip").exists())
+        self.assertEqual((config / "plugins" / "B Plugin.json").read_text(), '{"setting": 1}')
+
+    def test_failed_conversions_retried_when_plugins_change(self):
+        root = Path(self.tmp.name)
+        plugins = root / "plugins"
+        plugins.mkdir()
+        needs_plugin = root / "needs_plugin.py"
+        needs_plugin.write_text(
+            "import os, shutil, sys\n"
+            f"if not os.path.exists({str(plugins / 'helper.zip')!r}):\n"
+            "    sys.exit('cannot read this book without a plugin')\n"
+            "shutil.copyfile(sys.argv[1], sys.argv[2])\n"
+        )
+        env = {"PLUGINS_DIR": str(plugins), "EBOOK_CONVERT": f"{sys.executable} {needs_plugin}"}
+        self.book("Title.epub")
+        self.run_with(**env)
+        self.run_with(**env)  # same plugins: stays skipped
+        self.assertIn("Title.azw3", self.state()["failed"])
+        (plugins / "helper.zip").write_text("zip")
+        self.run_with(**env)
+        self.assertIn("Title.azw3", self.files())
+        self.assertEqual(self.state()["failed"], {})
+
     def test_part_symlink_not_followed(self):
         self.book("Title.epub")
         outside = Path(self.tmp.name) / "outside.txt"

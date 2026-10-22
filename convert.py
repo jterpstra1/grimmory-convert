@@ -45,6 +45,8 @@ class Config:
     state_dir: Path
     ebook_convert: list
     extra_args: list
+    plugins_dir: Path
+    calibre_customize: list
 
     @classmethod
     def from_env(cls):
@@ -59,6 +61,8 @@ class Config:
             state_dir=Path(os.environ.get("STATE_DIR", "/config")),
             ebook_convert=shlex.split(os.environ.get("EBOOK_CONVERT", "ebook-convert")),
             extra_args=shlex.split(os.environ.get("EXTRA_ARGS", "")),
+            plugins_dir=Path(os.environ.get("PLUGINS_DIR", "/plugins")),
+            calibre_customize=shlex.split(os.environ.get("CALIBRE_CUSTOMIZE", "calibre-customize")),
         )
 
 
@@ -183,12 +187,25 @@ def clean_stale_parts(cfg):
         part.unlink(missing_ok=True)
 
 
+def plugins_signature(cfg):
+    """What is in the plugins dir; a conversion that failed may work with other plugins."""
+    if not cfg.plugins_dir.is_dir():
+        return []
+    return [[f.name, *fingerprint(f)] for f in sorted(cfg.plugins_dir.iterdir()) if f.is_file()]
+
+
 def run_once(cfg):
     if not cfg.library_dir.is_dir():
         log(f"Library dir {cfg.library_dir} does not exist")
         return
     clean_stale_parts(cfg)
     state = load_state(cfg)
+    plugins = plugins_signature(cfg)
+    if state.get("plugins") != plugins:
+        if state["failed"]:
+            log(f"Calibre plugins changed, retrying {len(state['failed'])} failed conversion(s)")
+            state["failed"] = {}
+        state["plugins"] = plugins
     jobs = find_jobs(cfg, state)
     if not cfg.dry_run:
         save_state(cfg, state)
@@ -230,12 +247,37 @@ def run_once(cfg):
     log(f"Run finished: {verb} {done}, failed {errors}")
 
 
+def install_plugins(cfg):
+    """Install every Calibre plugin .zip in the plugins dir into a fresh Calibre config, so the
+    folder is the complete list: removing a zip removes the plugin on the next start. A plugin's
+    settings file (the .json Calibre keeps in its plugins folder) can be put next to the zips."""
+    config_dir = os.environ.get("CALIBRE_CONFIG_DIRECTORY")
+    if not config_dir or not cfg.plugins_dir.is_dir():
+        return
+    shutil.rmtree(config_dir, ignore_errors=True)
+    for plugin in sorted(cfg.plugins_dir.glob("*.zip")):
+        result = subprocess.run([*cfg.calibre_customize, "-a", str(plugin)], capture_output=True, text=True)
+        if result.returncode == 0:
+            log(f"Installed Calibre plugin {plugin.name}")
+        else:
+            tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
+            log(f"FAILED to install Calibre plugin {plugin.name}: " + " | ".join(tail))
+    settings = sorted(cfg.plugins_dir.glob("*.json"))
+    if settings:
+        target = Path(config_dir) / "plugins"
+        target.mkdir(parents=True, exist_ok=True)
+        for f in settings:
+            shutil.copyfile(f, target / f.name)
+            log(f"Copied Calibre plugin settings {f.name}")
+
+
 def main():
     # PID 1 in a container ignores SIGTERM unless handled; exiting via SystemExit
     # also makes subprocess.run kill a running ebook-convert.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     os.umask(int(os.environ.get("UMASK", "000"), 8))
     cfg = Config.from_env()
+    install_plugins(cfg)
     log(
         f"Library {cfg.library_dir}: {','.join(cfg.source_formats)} -> {','.join(cfg.target_formats)}"
         f"{' (DRY RUN, nothing is written)' if cfg.dry_run else ''}"

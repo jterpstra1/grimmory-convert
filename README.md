@@ -49,8 +49,28 @@ format. Grimmory itself is not changed.
 | `UMASK` | `000` | Unraid default, so files are readable/writable for the share like everything else |
 | `TZ` | | Timezone for log timestamps |
 
-Mounts: the library at `/books`, a small state dir at `/config`. The container runs as `99:100`
-(Unraid's `nobody:users`) and needs no network.
+Mounts: the library at `/books`, a small state dir at `/config`, and optionally Calibre plugins
+at `/plugins`. The container runs as `99:100` (Unraid's `nobody:users`) and needs no network.
+
+## Calibre plugins
+
+Any Calibre plugin that works with `ebook-convert` can be used: plugins that add an output
+format, or *File type* plugins that process a book before it is converted.
+
+1. Put the plugin's `.zip` (the same file you would load in Calibre via *Preferences > Plugins >
+   Load plugin from file*) in the folder mounted at `/plugins`.
+2. If the plugin needs settings, configure it in a desktop Calibre once, then copy its settings
+   file from Calibre's config folder (*Preferences > Miscellaneous > Open calibre configuration
+   directory*, then `plugins/<Plugin Name>.json`) next to the zip.
+3. Restart the container. The log shows `Installed Calibre plugin …` for each zip.
+
+Plugins are installed into a fresh Calibre config on every start, so the folder is the complete
+list: delete a zip and that plugin is gone after the next restart. When the contents of the
+folder change, conversions that failed before are retried once, since a plugin may fix them.
+
+Plugins run inside the container with access to your library, so only add ones you trust, and
+you are responsible for what they do to your books. Grimmory only picks up formats it knows
+(epub, pdf, mobi, azw3, fb2); a plugin output format like `kepub` is written but ignored by it.
 
 ## Unraid
 
