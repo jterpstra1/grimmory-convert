@@ -109,27 +109,31 @@ def find_jobs(cfg, state):
 
         for key, name in sorted(sources.items()):
             source = Path(dirpath) / name
-            source_fp = fingerprint(source)
-            stem = split_ext(name)[0]
-            for fmt in cfg.target_formats:
-                existing = files.get((key, fmt))
-                target = Path(dirpath) / existing if existing else source.with_name(f"{stem}.{fmt}")
-                target_rel = rel(cfg, target)
-                if existing:
-                    target_fp = fingerprint(target)
-                    entry = converted.get(target_rel)
-                    if entry is None:
-                        old = by_fingerprint.get(tuple(target_fp))
-                        if old is None or (cfg.library_dir / old).exists():
-                            continue  # not created by this tool: never touch it
-                        entry = converted[target_rel] = converted.pop(old)
-                    entry["target"] = target_fp
-                    if entry["source"] == source_fp:
-                        continue
-                fail = failed.get(target_rel)
-                if fail and fail["source"] == source_fp:
-                    continue  # failed before and the source has not changed since
-                jobs.append((source, target, fmt, bool(existing)))
+            try:
+                source_fp = fingerprint(source)
+                stem = split_ext(name)[0]
+                for fmt in cfg.target_formats:
+                    existing = files.get((key, fmt))
+                    target = Path(dirpath) / existing if existing else source.with_name(f"{stem}.{fmt}")
+                    target_rel = rel(cfg, target)
+                    if existing:
+                        target_fp = fingerprint(target)
+                        entry = converted.get(target_rel)
+                        if entry is None:
+                            old = by_fingerprint.get(tuple(target_fp))
+                            if old is None or (cfg.library_dir / old).exists():
+                                continue  # not created by this tool: never touch it
+                            entry = converted[target_rel] = converted.pop(old)
+                        entry["target"] = target_fp
+                        if entry["source"] == source_fp:
+                            continue
+                    fail = failed.get(target_rel)
+                    if fail and fail["source"] == source_fp:
+                        continue  # failed before and the source has not changed since
+                    jobs.append((source, target, fmt, bool(existing)))
+            except OSError as e:
+                # E.g. Grimmory moved or deleted the file mid-scan; the next run sees the new state.
+                log(f"Skipping {source}: {e}")
 
     for r in [r for r in converted if not (cfg.library_dir / r).exists()]:
         del converted[r]
@@ -202,17 +206,22 @@ def run_once(cfg):
         reason = " (source changed)" if is_update else ""
         log(f"Converting {rel(cfg, source)} -> {fmt}{reason}")
         started = time.monotonic()
-        # Taken before converting, so a change during the conversion triggers another one.
-        source_fp = fingerprint(source)
+        try:
+            # Taken before converting, so a change during the conversion triggers another one.
+            source_fp = fingerprint(source)
+        except OSError as e:
+            log(f"Skipping {rel(cfg, source)}: {e}")
+            continue
         try:
             convert(cfg, source, target, fmt)
+            target_fp = fingerprint(target)
         except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
             errors += 1
             state["failed"][target_rel] = {"error": str(e)[:500], "source": source_fp}
             save_state(cfg, state)
             log(f"FAILED {target_rel}: {e}")
             continue
-        state["converted"][target_rel] = {"source": source_fp, "target": fingerprint(target)}
+        state["converted"][target_rel] = {"source": source_fp, "target": target_fp}
         state["failed"].pop(target_rel, None)
         save_state(cfg, state)
         done += 1
@@ -232,7 +241,13 @@ def main():
         f"{' (DRY RUN, nothing is written)' if cfg.dry_run else ''}"
     )
     while True:
-        run_once(cfg)
+        try:
+            run_once(cfg)
+        except Exception as e:
+            if cfg.interval_minutes <= 0:
+                raise
+            # Keep the container alive; the next run starts from a fresh scan.
+            log(f"Run failed: {e!r}")
         if cfg.interval_minutes <= 0:
             return
         log(f"Next run in {cfg.interval_minutes} min")

@@ -169,6 +169,12 @@ class ConvertTest(unittest.TestCase):
         self.assertEqual(self.files(), ["Title.azw3", "Title.epub"])
         self.assertEqual((self.lib / "Title.azw3").read_text(), "book")
 
+    def test_unreadable_file_is_skipped_not_fatal(self):
+        (self.lib / "Gone.epub").symlink_to(self.lib / "does-not-exist.epub")
+        self.book("Good.epub")
+        self.run_with()
+        self.assertIn("Good.azw3", self.files())
+
     def test_part_symlink_not_followed(self):
         self.book("Title.epub")
         outside = Path(self.tmp.name) / "outside.txt"
