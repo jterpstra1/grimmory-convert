@@ -1,5 +1,9 @@
 # grimmory-convert
 
+> **Archived.** Continued as [ebook-convert-sidecar](https://github.com/jterpstra1/ebook-convert-sidecar),
+> which works with Grimmory, BookOrbit and other library apps. The
+> `ghcr.io/jterpstra1/grimmory-convert` image stays available but gets no more updates.
+
 Converts books in a [Grimmory](https://grimmory.org) library to extra formats with Calibre's
 `ebook-convert`, and saves the result next to the original:
 
